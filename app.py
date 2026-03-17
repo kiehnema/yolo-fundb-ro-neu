@@ -5,7 +5,7 @@ import os
 from PIL import Image, ImageDraw
 import numpy as np
 import pandas as pd
-from ultralytics import YOLO  # Alternative zu YOLO-World
+from ultralytics import YOLO
 import tempfile
 
 # --- Konfiguration ---
@@ -35,7 +35,7 @@ conn = init_db()
 @st.cache_resource
 def load_model():
     try:
-        model = YOLO('yolov8n.pt')  # Leichtes Modell für Streamlit Cloud
+        model = YOLO('yolov8n.pt')
         return model
     except Exception as e:
         st.error(f"Modell konnte nicht geladen werden: {e}")
@@ -69,7 +69,7 @@ def detect_objects(image_path, model):
     return pd.DataFrame(detections)
 
 def draw_boxes_pil(image_path, detected_objects):
-    """Zeichnet Bounding Boxes mit PIL (kein OpenCV benötigt)"""
+    """Zeichnet Bounding Boxes mit PIL"""
     image = Image.open(image_path)
     draw = ImageDraw.Draw(image)
     
@@ -102,16 +102,13 @@ def upload_page():
     if uploaded_file and st.button("Eintrag speichern"):
         with st.spinner("Analysiere Bild..."):
             try:
-                # Bild speichern und analysieren
                 image_path = save_uploaded_file(uploaded_file)
                 detections = detect_objects(image_path, model)
                 
                 if not detections.empty:
-                    # Ergebnisse anzeigen
                     result_image = draw_boxes_pil(image_path, detections)
                     st.image(result_image, caption="Erkannte Objekte", use_column_width=True)
                     
-                    # In Datenbank speichern
                     objects_str = ", ".join(detections['name'].unique())
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     
@@ -214,16 +211,12 @@ page = st.sidebar.radio(
 
 st.sidebar.markdown("---")
 st.sidebar.info(
-    "Digitales Fundbüro v1.0
+    """Digitales Fundbüro v1.0
 
-"
-    "Funktionen:
-"
-    "- Objekterkennung mit YOLOv8
-"
-    "- Verloren/Gefunden-Meldungen
-"
-    "- Durchsuchbare Datenbank"
+Funktionen:
+- Objekterkennung mit YOLOv8
+- Verloren/Gefunden-Meldungen
+- Durchsuchbare Datenbank"""
 )
 
 if page == "Gegenstand melden":
