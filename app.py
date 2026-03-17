@@ -1,33 +1,12 @@
-# digital_fundbuero.py
-"""
-Digitale Fundbüro Streamlit-App
---------------------------------
-Funktionen:
-- Upload von Bildern verlorener oder gefundener Gegenstände
-- Automatische Objekterkennung mit YOLOv8
-- Anzeige von Bounding Boxes auf dem Originalbild
-- Speicherung in SQLite-Datenbank
-- Suchfunktion nach Objektlabels
-- Übersicht aller Gegenstände
-
-Deployment:
-1. Stelle sicher, dass Streamlit und alle dependencies installiert sind.
-2. Deploy auf https://streamlit.io/cloud
-"""
-
+# digital_fundbuero_app.py
 import streamlit as st
 from PIL import Image
 import sqlite3
-import io
-import os
 from datetime import datetime
-import pandas as pd
+import os
+import torch
 import tempfile
-
-# YOLO Import (Ultralytics YOLOv8)
-from ultralytics import YOLO
-import cv2
-import numpy as np
+import pandas as pd
 
 # ---------------------------
 # 1. Datenbank Setup
@@ -52,21 +31,21 @@ def init_db():
 init_db()
 
 # ---------------------------
-# 2. YOLO Setup
+# 2. YOLO Modell (CPU-only, stabil auf Streamlit Cloud)
 # ---------------------------
 @st.cache_resource
 def load_model():
-    # YOLOv8 small model, erkennt viele Objekte
-    return YOLO("yolov8n.pt")
+    # YOLOv5s über Torch Hub, CPU-only
+    model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+    model.cpu()
+    return model
 
 model = load_model()
 
 # ---------------------------
 # 3. Helper Funktionen
 # ---------------------------
-
 def save_image(image: Image.Image):
-    """Speichert Bild temporär und gibt Pfad zurück"""
     temp_dir = "images"
     os.makedirs(temp_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -75,27 +54,18 @@ def save_image(image: Image.Image):
     return path
 
 def detect_objects(image_path: str):
-    """Erkennt Objekte im Bild mit YOLOv8"""
-    results = model.predict(image_path)
-    detected_objects = []
-    # Erstelle Kopie für Bounding Boxen
-    image = cv2.imread(image_path)
-    for r in results:
-        boxes = r.boxes
-        for box in boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            conf = float(box.conf[0])
-            cls_id = int(box.cls[0])
-            label = r.names[cls_id]
-            detected_objects.append(f"{label} ({conf:.2f})")
-            # Bounding Box zeichnen
-            cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(image, f"{label} {conf:.2f}", (x1, y1-10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
+    img = Image.open(image_path)
+    results = model(img, size=640)
+    objects = []
+    # Bounding Boxes auf Bild zeichnen
+    im = results.render()[0]  # render() gibt numpy array
+    for *box, conf, cls in results.xyxy[0]:
+        label = model.names[int(cls)]
+        objects.append(f"{label} ({conf:.2f})")
     # Speichern mit Bounding Boxes
     boxed_path = image_path.replace(".png", "_boxed.png")
-    cv2.imwrite(boxed_path, image)
-    return detected_objects, boxed_path
+    Image.fromarray(im).save(boxed_path)
+    return objects, boxed_path
 
 def insert_item(image_path, objects, item_type):
     conn = sqlite3.connect(DB_PATH)
@@ -120,11 +90,9 @@ def query_items(label_filter=None):
 # 4. Streamlit UI
 # ---------------------------
 st.set_page_config(page_title="Digitales Fundbüro", layout="wide")
-
 st.title("📦 Digitales Fundbüro")
 st.markdown("Finde oder melde verlorene Gegenstände.")
 
-# Tabs für Upload und Suche
 tab1, tab2 = st.tabs(["Gegenstand melden", "Gegenstände durchsuchen"])
 
 with tab1:
@@ -136,7 +104,7 @@ with tab1:
         image_path = save_image(image)
         objects, boxed_path = detect_objects(image_path)
         insert_item(image_path, objects, item_type)
-        st.success(f"Erkennung abgeschlossen: {len(objects)} Objekte gefunden")
+        st.success(f"{len(objects)} Objekte erkannt")
         st.image(boxed_path, caption="Erkannte Objekte", use_column_width=True)
         st.write(objects)
 
@@ -152,6 +120,3 @@ with tab2:
                 st.write("Erkannte Objekte:", row[2])
         else:
             st.info("Keine Gegenstände gefunden.")
-
-st.markdown("---")
-st.markdown("© 2026 Digitales Fundbüro")
