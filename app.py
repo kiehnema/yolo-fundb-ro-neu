@@ -2,103 +2,236 @@ import streamlit as st
 import sqlite3
 from datetime import datetime
 import os
-from PIL import Image
-import cv2
-import torch
-from yoloworld import YOLOWorld  # YOLO-World implementation
+from PIL import Image, ImageDraw
+import numpy as np
+import pandas as pd
+from ultralytics import YOLO  # Alternative zu YOLO-World
+import tempfile
 
-# Initialize YOLO-World model
-model = YOLOWorld(model_name='yolo_world')
+# --- Konfiguration ---
+st.set_page_config(
+    page_title="Digitales Fundbüro",
+    page_icon="🔍",
+    layout="wide"
+)
 
-# Initialize SQLite database
-conn = sqlite3.connect('lost_and_found.db')
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS items
-             (id INTEGER PRIMARY KEY AUTOINCREMENT,
-              image_path TEXT,
-              objects TEXT,
-              item_type TEXT,
-              timestamp TEXT)''')
-conn.commit()
+# --- Datenbank Initialisierung ---
+def init_db():
+    conn = sqlite3.connect('lost_and_found.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS items
+                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 image_path TEXT,
+                 objects TEXT,
+                 item_type TEXT,
+                 timestamp TEXT,
+                 contact_info TEXT)''')
+    conn.commit()
+    return conn
 
-# Streamlit App Layout
-st.title("Digitales Fundbüro")
-st.sidebar.title("Navigation")
-page = st.sidebar.radio("Seite auswählen", ["Gegenstand hochladen", "Gegenstände durchsuchen", "Alle Gegenstände anzeigen"])
+conn = init_db()
 
-# Function to save uploaded image
+# --- YOLO Modell Initialisierung ---
+@st.cache_resource
+def load_model():
+    try:
+        model = YOLO('yolov8n.pt')  # Leichtes Modell für Streamlit Cloud
+        return model
+    except Exception as e:
+        st.error(f"Modell konnte nicht geladen werden: {e}")
+        return None
+
+model = load_model()
+
+# --- Hilfsfunktionen ---
 def save_uploaded_file(uploaded_file):
-    if not os.path.exists("uploads"):
-        os.makedirs("uploads")
-    file_path = os.path.join("uploads", uploaded_file.name)
-    with open(file_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    return file_path
+    """Speichert hochgeladene Datei und gibt Pfad zurück"""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+        tmp_file.write(uploaded_file.getvalue())
+        return tmp_file.name
 
-# Function to detect objects in an image using YOLO-World
-def detect_objects(image_path):
-    image = cv2.imread(image_path)
-    results = model(image)
-    detected_objects = results.pandas().xyxy[0]  # Get detected objects
-    return detected_objects
+def detect_objects(image_path, model):
+    """Erkennt Objekte mit YOLO und gibt DataFrame zurück"""
+    results = model(image_path)
+    detections = []
+    
+    for result in results:
+        for box in result.boxes:
+            detections.append({
+                'name': result.names[int(box.cls)],
+                'confidence': float(box.conf),
+                'xmin': float(box.xyxy[0][0]),
+                'ymin': float(box.xyxy[0][1]),
+                'xmax': float(box.xyxy[0][2]),
+                'ymax': float(box.xyxy[0][3])
+            })
+    
+    return pd.DataFrame(detections)
 
-# Function to draw bounding boxes on the image
-def draw_boxes(image_path, detected_objects):
-    image = cv2.imread(image_path)
+def draw_boxes_pil(image_path, detected_objects):
+    """Zeichnet Bounding Boxes mit PIL (kein OpenCV benötigt)"""
+    image = Image.open(image_path)
+    draw = ImageDraw.Draw(image)
+    
     for _, obj in detected_objects.iterrows():
-        label = obj['name']
-        confidence = obj['confidence']
-        x1, y1, x2, y2 = int(obj['xmin']), int(obj['ymin']), int(obj['xmax']), int(obj['ymax'])
-        cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(image, f"{label} {confidence:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        box = [
+            obj['xmin'], obj['ymin'],
+            obj['xmax'], obj['ymax']
+        ]
+        draw.rectangle(box, outline="red", width=3)
+        label = f"{obj['name']} {obj['confidence']:.2f}"
+        draw.text((box[0], box[1] - 15), label, fill="red")
+    
     return image
 
-# Page: Upload Item
-if page == "Gegenstand hochladen":
-    st.header("Gegenstand hochladen")
-    uploaded_file = st.file_uploader("Bild des Gegenstands hochladen", type=["jpg", "jpeg", "png"])
-    item_type = st.radio("Typ des Gegenstands", ["verloren", "gefunden"])
+# --- Streamlit UI ---
+def upload_page():
+    st.header("🔹 Gegenstand melden")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        uploaded_file = st.file_uploader("Bild hochladen", type=["jpg", "jpeg", "png"])
+        item_type = st.radio("Art des Eintrags", ["Verloren", "Gefunden"], index=0)
+        contact_info = st.text_input("Kontaktinformation (optional)")
+    
+    with col2:
+        if uploaded_file:
+            st.image(uploaded_file, caption="Hochgeladenes Bild", use_column_width=True)
+    
+    if uploaded_file and st.button("Eintrag speichern"):
+        with st.spinner("Analysiere Bild..."):
+            try:
+                # Bild speichern und analysieren
+                image_path = save_uploaded_file(uploaded_file)
+                detections = detect_objects(image_path, model)
+                
+                if not detections.empty:
+                    # Ergebnisse anzeigen
+                    result_image = draw_boxes_pil(image_path, detections)
+                    st.image(result_image, caption="Erkannte Objekte", use_column_width=True)
+                    
+                    # In Datenbank speichern
+                    objects_str = ", ".join(detections['name'].unique())
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    conn.execute(
+                        "INSERT INTO items (image_path, objects, item_type, timestamp, contact_info) VALUES (?, ?, ?, ?, ?)",
+                        (image_path, objects_str, item_type, timestamp, contact_info)
+                    )
+                    conn.commit()
+                    
+                    st.success("✅ Eintrag erfolgreich gespeichert!")
+                    st.json({
+                        "Erkannte Objekte": list(detections['name'].unique()),
+                        "Typ": item_type,
+                        "Zeitpunkt": timestamp
+                    })
+                else:
+                    st.warning("⚠️ Keine Objekte erkannt. Bitte besseres Foto versuchen.")
+            
+            except Exception as e:
+                st.error(f"Fehler: {str(e)}")
 
-    if uploaded_file is not None and item_type:
-        file_path = save_uploaded_file(uploaded_file)
-        detected_objects = detect_objects(file_path)
-        image_with_boxes = draw_boxes(file_path, detected_objects)
-        st.image(image_with_boxes, caption="Erkannte Objekte", use_column_width=True)
-
-        # Save to database
-        objects = ", ".join(detected_objects['name'].tolist())
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        c.execute("INSERT INTO items (image_path, objects, item_type, timestamp) VALUES (?, ?, ?, ?)",
-                  (file_path, objects, item_type, timestamp))
-        conn.commit()
-        st.success("Gegenstand erfolgreich hochgeladen und gespeichert!")
-
-# Page: Search Items
-elif page == "Gegenstände durchsuchen":
-    st.header("Gegenstände durchsuchen")
-    search_query = st.text_input("Nach Objektlabels suchen")
+def search_page():
+    st.header("🔍 Gegenstände suchen")
+    
+    search_query = st.text_input("Suchbegriff eingeben (z.B. 'Schlüssel', 'Handy')")
+    item_filter = st.selectbox("Filter nach Typ", ["Alle", "Verloren", "Gefunden"])
+    
+    query = "SELECT * FROM items"
+    conditions = []
+    
     if search_query:
-        c.execute("SELECT * FROM items WHERE objects LIKE ?", (f"%{search_query}%",))
-        results = c.fetchall()
-        if results:
-            st.write("Gefundene Gegenstände:")
-            for result in results:
-                st.write(f"ID: {result[0]}, Typ: {result[3]}, Zeitstempel: {result[4]}")
-                st.image(result[1], caption=result[2], use_column_width=True)
-        else:
-            st.warning("Keine Gegenstände gefunden.")
+        conditions.append(f"objects LIKE '%{search_query}%'")
+    if item_filter != "Alle":
+        conditions.append(f"item_type = '{item_filter}'")
+    
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    
+    results = conn.execute(query).fetchall()
+    
+    if results:
+        st.subheader(f"Ergebnisse ({len(results)})")
+        
+        for item in results:
+            with st.expander(f"🔸 {item[3]} - {item[2]} ({item[4]})"):
+                col1, col2 = st.columns([1, 2])
+                
+                with col1:
+                    try:
+                        st.image(item[1], use_column_width=True)
+                    except:
+                        st.warning("Bild konnte nicht geladen werden")
+                
+                with col2:
+                    st.write(f"**Typ:** {item[3]}")
+                    st.write(f"**Objekte:** {item[2]}")
+                    st.write(f"**Datum:** {item[4]}")
+                    if item[5]:
+                        st.write(f"**Kontakt:** {item[5]}")
+    else:
+        st.info("Keine Ergebnisse gefunden")
 
-# Page: Show All Items
-elif page == "Alle Gegenstände anzeigen":
-    st.header("Alle Gegenstände")
-    c.execute("SELECT * FROM items")
-    all_items = c.fetchall()
+def browse_page():
+    st.header("📋 Alle Einträge")
+    
+    all_items = conn.execute("SELECT * FROM items ORDER BY timestamp DESC").fetchall()
+    
     if all_items:
         for item in all_items:
-            st.write(f"ID: {item[0]}, Typ: {item[3]}, Zeitstempel: {item[4]}")
-            st.image(item[1], caption=item[2], use_column_width=True)
+            st.divider()
+            
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+                try:
+                    st.image(item[1], use_column_width=True)
+                except:
+                    st.warning("Bild nicht verfügbar")
+            
+            with col2:
+                st.subheader(f"{item[3]} - {item[2]}")
+                st.caption(f"Eingetragen am: {item[4]}")
+                if item[5]:
+                    st.write(f"**Kontakt:** {item[5]}")
+                
+                if st.button("Details anzeigen", key=f"btn_{item[0]}"):
+                    detections = pd.DataFrame([{'name': obj} for obj in item[2].split(", ")])
+                    st.write("Erkannte Objekte:")
+                    st.dataframe(detections['name'].value_counts())
     else:
-        st.info("Keine Gegenstände vorhanden.")
+        st.info("Noch keine Einträge vorhanden")
 
-# Close database connection
+# --- Hauptnavigation ---
+st.sidebar.title("Navigation")
+page = st.sidebar.radio(
+    "Menü",
+    ["Gegenstand melden", "Gegenstände suchen", "Alle Einträge"],
+    index=0
+)
+
+st.sidebar.markdown("---")
+st.sidebar.info(
+    "Digitales Fundbüro v1.0
+
+"
+    "Funktionen:
+"
+    "- Objekterkennung mit YOLOv8
+"
+    "- Verloren/Gefunden-Meldungen
+"
+    "- Durchsuchbare Datenbank"
+)
+
+if page == "Gegenstand melden":
+    upload_page()
+elif page == "Gegenstände suchen":
+    search_page()
+elif page == "Alle Einträge":
+    browse_page()
+
+# --- Aufräumen ---
 conn.close()
