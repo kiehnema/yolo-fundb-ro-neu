@@ -1,6 +1,6 @@
-streamlit
-torch
-opencv-python-headless>=4.5.0  # Wichtig: headless-Version!
-sqlite3
-Pillow
-yoloworld
+streamlit>=1.28.0
+Pillow>=10.0.0
+ultralytics>=8.0.0
+numpy>=1.24.0
+pandas>=2.0.0
+sqlite3>=2.6.0
