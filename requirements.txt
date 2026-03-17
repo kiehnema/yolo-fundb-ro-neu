@@ -1,5 +1,6 @@
 streamlit
-pillow
-ultralytics
 torch
-pandas
+opencv-python
+sqlite3
+Pillow
+yoloworld
